@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: ringbreaker
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn ringbreaker.web.app:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/status
+    envVars:
+      - key: FALKORDB_HOST
+        sync: false
+      - key: FALKORDB_PORT
+        sync: false
+      - key: FALKORDB_USERNAME
+        sync: false
+      - key: FALKORDB_PASSWORD
+        sync: false
+      - key: FALKORDB_SSL
+        sync: false
+      - key: RB_GRAPH
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: RB_MODEL
+        sync: false
+      - key: RB_ALLOW_RESET
+        value: "1"

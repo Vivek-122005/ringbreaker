@@ -225,6 +225,16 @@ python -m ringbreaker.mcp_server --http   # streamable HTTP on :8765
 
 Without Docker you can use embedded FalkorDB for development: `pip install -r requirements-dev.txt` and leave `FALKORDB_HOST` unset.
 
+## Live deployment
+
+The analyst console deploys to [Render](https://render.com) as a Python web service backed by FalkorDB Cloud. `render.yaml` holds the blueprint.
+
+1. In Render, choose **New > Blueprint** and select this repository.
+2. Fill in the secret environment variables when prompted: `FALKORDB_HOST`, `FALKORDB_PORT`, `FALKORDB_USERNAME`, `FALKORDB_PASSWORD`, `FALKORDB_SSL` (`true` if your instance requires TLS), `RB_GRAPH` (for example `ringbreaker`) and, optionally, `GEMINI_API_KEY` and `RB_MODEL`.
+3. Load the demo bank into FalkorDB Cloud once, from your machine with the same settings: `python -m ringbreaker.load`. The console's **Reset** button rebuilds it at any time.
+
+The service runs `uvicorn ringbreaker.web.app:app --host 0.0.0.0 --port $PORT`. Set `RB_ALLOW_RESET=0` to disable the reset endpoint on a public instance.
+
 ## Project layout
 
 ```

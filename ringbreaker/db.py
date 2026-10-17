@@ -17,7 +17,11 @@ def _client():
                         username=os.getenv("FALKORDB_USERNAME") or None,
                         password=os.getenv("FALKORDB_PASSWORD") or None,
                         ssl=os.getenv("FALKORDB_SSL", "").lower() in ("1", "true", "yes"))
-    from redislite.falkordb_client import FalkorDB
+    try:
+        from redislite.falkordb_client import FalkorDB
+    except ImportError as e:
+        raise RuntimeError("Set FALKORDB_HOST to a FalkorDB server, or pip install -r requirements-dev.txt "
+                           "for the embedded database.") from e
     return FalkorDB(os.getenv("FALKORDB_LITE_PATH", "data/ringbreaker.db"))
 
 
