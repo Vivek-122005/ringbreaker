@@ -15,10 +15,10 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from . import db
+from . import db, learning, policies
 
 MAX_HOPS = 5
-LABELS = ["Account", "Person", "Device", "IP", "Phone", "Address", "Merchant", "Alert", "Case", "Finding"]
+LABELS = ["Account", "Person", "Device", "IP", "Phone", "Address", "Merchant", "Alert", "Case", "Finding", "Action", "Policy"]
 
 
 class ToolError(ValueError):
@@ -337,7 +337,9 @@ def explain_connection(from_id: str, to_id: str) -> dict:
 
 
 def prior_knowledge(entity_ids: list[str]) -> dict:
-    """Findings, cases and actions already recorded on these entities by earlier investigations."""
+    """Findings, cases and analyst outcomes already recorded on these entities by earlier
+    investigations: known_bad (in a case an analyst has not overturned) and analyst_cleared (every
+    case on it was overturned by an analyst)."""
     ids = list(dict.fromkeys(entity_ids))[:60]
     r = db.read("""
         MATCH (n) WHERE n.id IN $ids
@@ -349,7 +351,16 @@ def prior_knowledge(entity_ids: list[str]) -> dict:
                [x IN fs WHERE x.finding IS NOT NULL] AS findings, [x IN cs WHERE x.case IS NOT NULL] AS cases""",
                 {"ids": ids})
     r = [x for x in r if x["findings"] or x["cases"] or x["status"] == "frozen"]
-    return {"data": {"known": r, "count": len(r)} if r else {"known": [], "note": "Nothing recorded yet on these entities."},
+    for x in r:
+        statuses = [c["status"] for c in x["cases"]]
+        x["analyst_confirmed"] = "confirmed" in statuses
+        # cleared: every case on this entity was overturned by an analyst
+        x["analyst_cleared"] = bool(statuses) and all(st == "overturned" for st in statuses)
+        x["known_bad"] = any(st != "overturned" for st in statuses) or (not statuses and bool(x["findings"]))
+    if not r:
+        return {"data": {"known": [], "note": "Nothing recorded yet on these entities."}, "evidence": _ev()}
+    return {"data": {"known": r, "count": len(r), "known_bad": [x["entity"] for x in r if x["known_bad"]],
+                     "analyst_cleared": [x["entity"] for x in r if x["analyst_cleared"]]},
             "evidence": _ev([x["entity"] for x in r])}
 
 
@@ -357,73 +368,116 @@ def prior_knowledge(entity_ids: list[str]) -> dict:
 # Action tools (write to the graph)
 # ---------------------------------------------------------------------------
 
-def open_case(alert_id: str, account_ids: list[str], typology: str, risk: float, summary: str) -> dict:
-    """Open an investigation case linking the alert and every account in the ring."""
+def open_case(alert_id: str, account_ids: list[str], typology: str, risk: float, summary: str,
+              signals: list[str] | None = None) -> dict:
+    """Open an investigation case linking the alert and every account in the ring. Policy
+    POL-CASE-CONNECTED leaves out accounts with no identity or money connection to the alerted
+    account. `signals` optionally names the evidence signals behind the risk score, so analyst
+    reviews of the case can calibrate them."""
     _resolve(alert_id, "Alert")
-    ids = _accounts(account_ids)
-    cid = f"CASE-{int(time.time() * 1000) % 10_000_000:07d}"
+    ids, checks = policies.check_case(alert_id, _accounts(account_ids))
+    cid = policies.new_id("CASE")
+    sigs = list(dict.fromkeys(x for x in (signals or []) if x in learning.SIGNALS))
     db.write("""
         MATCH (al:Alert {id: $alert})
         CREATE (c:Case {id: $cid, typology: $typ, risk: $risk, summary: $summary, status: 'open',
-                        created: timestamp()})-[:RAISED_FROM]->(al)
+                        signals: $sigs, created: timestamp()})-[:RAISED_FROM]->(al)
         WITH c
         UNWIND $ids AS aid MATCH (a:Account {id: aid}) CREATE (c)-[:INCLUDES]->(a)""",
              {"alert": alert_id, "cid": cid, "typ": str(typology)[:60], "risk": float(risk),
-              "summary": str(summary)[:2000], "ids": ids})
-    return {"data": {"case": cid, "accounts": len(ids)}, "evidence": _ev([cid, alert_id] + ids)}
+              "summary": str(summary)[:2000], "ids": ids, "sigs": sigs})
+    xid = _action(cid, "open_case", "done", f"case opened from {alert_id}", ids)
+    policies.record(xid, checks)
+    return {"data": {"case": cid, "accounts": len(ids), "account_ids": ids, "action": xid, "policies": checks},
+            "evidence": _ev([cid, alert_id] + ids)}
 
 
-def record_finding(case_id: str, entity_ids: list[str], text: str) -> dict:
-    """Write a finding into the graph so future investigations start from it."""
+def record_finding(case_id: str, entity_ids: list[str], text: str, family: str | None = None) -> dict:
+    """Write a finding into the graph so future investigations start from it. `family` is the
+    evidence family: money_movement, shared_identity, network_structure, prior_knowledge or
+    other (inferred from the text when omitted). Freezes need findings from 2+ families."""
     _resolve(case_id, "Case")
     ids = list(dict.fromkeys(entity_ids))[:40]
     for i in ids:
         _resolve(i)
-    fid = f"F-{int(time.time() * 1000) % 10_000_000:07d}"
+    fam = family if family in policies.FAMILIES else policies.infer_family(str(text))
+    fid = policies.new_id("F")
     db.write("""
         MATCH (c:Case {id: $cid})
-        CREATE (c)-[:HAS_FINDING]->(f:Finding {id: $fid, text: $text, created: timestamp()})
+        CREATE (c)-[:HAS_FINDING]->(f:Finding {id: $fid, text: $text, family: $fam, created: timestamp()})
         WITH f UNWIND $ids AS eid MATCH (n {id: eid}) CREATE (f)-[:ABOUT]->(n)""",
-             {"cid": case_id, "fid": fid, "text": str(text)[:1000], "ids": ids})
-    return {"data": {"finding": fid}, "evidence": _ev([fid] + ids)}
+             {"cid": case_id, "fid": fid, "text": str(text)[:1000], "ids": ids, "fam": fam})
+    return {"data": {"finding": fid, "family": fam}, "evidence": _ev([fid] + ids)}
 
 
 def freeze_accounts(case_id: str, account_ids: list[str] | None = None, reason: str = "") -> dict:
-    """Freeze outgoing payments on accounts in a case. Only allowed for cases with risk >= 0.8
-    (bank policy); otherwise the request is recorded as a recommendation for an analyst.
-    If account_ids is omitted, every account in the case is frozen."""
+    """Freeze outgoing payments on accounts in a case. The freeze policies are checked first
+    (see get_policies): it executes only if every policy passes; otherwise it is recorded as a
+    recommendation pending an analyst, or blocked. If account_ids is omitted, every account in
+    the case is used."""
     _resolve(case_id, "Case")
     if not account_ids:
         account_ids = [r["id"] for r in db.read(
             "MATCH (:Case {id: $id})-[:INCLUDES]->(a:Account) RETURN a.id AS id", {"id": case_id})]
     ids = _accounts(account_ids)
-    risk = db.read("MATCH (c:Case {id: $id}) RETURN c.risk AS r", {"id": case_id})[0]["r"]
-    if risk < 0.8:
-        status, kind = "pending_analyst", "freeze_recommended"
-    else:
-        status, kind = "done", "freeze"
+    checks = policies.check_freeze(case_id, ids)
+    status = policies.overall(checks)
+    kind = "freeze" if status == "done" else "freeze_recommended"
+    if status == "done":
         db.write("UNWIND $ids AS aid MATCH (a:Account {id: aid}) SET a.status = 'frozen'", {"ids": ids})
-    db.write("""
-        MATCH (c:Case {id: $cid})
-        CREATE (c)-[:TOOK]->(x:Action {id: $xid, kind: $kind, status: $status, reason: $reason, created: timestamp()})
-        WITH x UNWIND $ids AS aid MATCH (a:Account {id: aid}) CREATE (x)-[:ON]->(a)""",
-             {"cid": case_id, "xid": f"ACT-{int(time.time() * 1000) % 10_000_000:07d}", "kind": kind,
-              "status": status, "reason": str(reason)[:500], "ids": ids})
-    return {"data": {"action": kind, "status": status, "accounts": ids, "case_risk": risk},
+    xid = _action(case_id, kind, status, reason, ids)
+    policies.record(xid, checks)
+    risk = db.read("MATCH (c:Case {id: $id}) RETURN c.risk AS r", {"id": case_id})[0]["r"]
+    return {"data": {"action": kind, "action_id": xid, "status": status, "accounts": ids, "case_risk": risk,
+                     "policies": checks},
             "evidence": _ev(ids + [case_id])}
 
 
 def close_alert(alert_id: str, disposition: str, reason: str) -> dict:
-    """Close an alert as 'false_positive' or 'escalated_to_case' with a documented reason (audit trail)."""
+    """Close an alert as 'false_positive' or 'escalated_to_case' with a documented reason (audit
+    trail). Policy POL-FP-REASON: a false-positive reason must name at least one graph entity."""
     _resolve(alert_id, "Alert")
     if disposition not in ("false_positive", "escalated_to_case"):
         raise ToolError("disposition must be false_positive or escalated_to_case")
-    db.write("MATCH (al:Alert {id: $id}) SET al.status = 'closed', al.disposition = $d, al.reason = $r, al.closed = timestamp()",
-             {"id": alert_id, "d": disposition, "r": str(reason)[:1000]})
-    return {"data": {"alert": alert_id, "disposition": disposition}, "evidence": _ev([alert_id])}
+    checks = policies.check_close(disposition, reason)
+    status = policies.overall(checks)
+    if status == "done":
+        db.write("MATCH (al:Alert {id: $id}) SET al.status = 'closed', al.disposition = $d, al.reason = $r, al.closed = timestamp()",
+                 {"id": alert_id, "d": disposition, "r": str(reason)[:1000]})
+    xid = _action(None, "close_alert", status, str(reason), [alert_id])
+    policies.record(xid, checks)
+    data = {"alert": alert_id, "disposition": disposition, "status": status, "action_id": xid, "policies": checks}
+    if status != "done":
+        data["note"] = "Alert NOT closed: fix the reason as the failed policy describes, then call close_alert again."
+    return {"data": data, "evidence": _ev([alert_id])}
 
 
-READ_TOOLS = [get_alert, account_profile, follow_money, find_cycles, shared_identifiers, identity_cluster,
-              rank_roles, explain_connection, prior_knowledge]
+def _action(case_id: str | None, kind: str, status: str, reason: str, target_ids: list[str]) -> str:
+    xid = policies.new_id("ACT")
+    db.write("""
+        CREATE (x:Action {id: $xid, kind: $kind, status: $status, reason: $reason, created: timestamp()})
+        WITH x OPTIONAL MATCH (c:Case {id: $cid})
+        FOREACH (_ IN CASE WHEN c IS NULL THEN [] ELSE [1] END | CREATE (c)-[:TOOK]->(x))
+        WITH x UNWIND $ids AS tid MATCH (t {id: tid}) CREATE (x)-[:ON]->(t)""",
+             {"xid": xid, "kind": kind, "status": status, "reason": str(reason)[:500], "cid": case_id or "",
+              "ids": target_ids})
+    return xid
+
+
+def get_policies() -> dict:
+    """The bank's active must-follow policies (stored in the graph). Action tools enforce them
+    server-side; read them first so the plan satisfies them (e.g. record findings from at least
+    two evidence families before asking for a freeze)."""
+    return {"data": {"policies": policies.active()}, "evidence": _ev()}
+
+
+def signal_calibration() -> dict:
+    """Current evidence-signal weights after analyst reviews, with the confirmed / overturned
+    counts behind each, and the precision of each monitoring rule as judged by analysts."""
+    return {"data": learning.calibration(), "evidence": _ev()}
+
+
+READ_TOOLS = [get_policies, get_alert, account_profile, follow_money, find_cycles, shared_identifiers, identity_cluster,
+              rank_roles, explain_connection, prior_knowledge, signal_calibration]
 ACTION_TOOLS = [open_case, record_finding, freeze_accounts, close_alert]
 ALL_TOOLS: dict[str, Any] = {f.__name__: f for f in READ_TOOLS + ACTION_TOOLS + [list_open_alerts]}

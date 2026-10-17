@@ -27,6 +27,8 @@ import httpx
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 
+from . import policies
+
 PROVIDERS = {
     "gemini": ("https://generativelanguage.googleapis.com/v1beta/openai", "GEMINI_API_KEY", "gemini-flash-lite-latest"),
     "groq": ("https://api.groq.com/openai/v1", "GROQ_API_KEY", "llama-3.3-70b-versatile"),
@@ -41,14 +43,17 @@ alert has fired. Most alerts are false positives (families sharing a home networ
 some are one visible edge of a money-mule network, a round-tripping loop or a synthetic-identity ring.
 
 Work the alert like a senior analyst, using only the graph tools:
-1. get_alert, then account_profile and prior_knowledge for the flagged account.
+0. get_policies: the bank's must-follow rules. Action tools enforce them server-side and report which passed.
+1. get_alert, then account_profile and prior_knowledge for the flagged account (known_bad / analyst_cleared).
 2. Pivot: shared_identifiers and identity_cluster (who else controls this account's devices, IPs, phones, addresses?).
 3. Follow the money: follow_money out and in; find_cycles for loops.
 4. If a ring emerges, rank_roles over the candidate accounts to label collector / layering / cash-out.
 5. Use explain_connection when you need to justify why two accounts belong together.
-6. Decide. If it is a ring (risk >= 0.5): open_case with every ring account, record_finding for the key evidence,
-   freeze_accounts for the accounts still holding or moving funds (the tool enforces bank policy), then
-   close_alert as escalated_to_case. If it is benign: close_alert as false_positive with the reason.
+6. Decide. If it is a ring (risk >= 0.5): open_case with every ring account, record_finding for the key evidence
+   (at least 3 findings covering at least 2 families: money_movement, shared_identity, network_structure),
+   freeze_accounts for the accounts still holding or moving funds, then close_alert as escalated_to_case.
+   If it is benign: close_alert as false_positive with a reason that names the account and the benign facts.
+   If a policy blocks or escalates an action, do not retry it to get around the policy; report it in the verdict.
 7. Finish by calling submit_verdict.
 
 Rules:
@@ -178,12 +183,32 @@ async def investigate(alert_id: str, planner: str = "auto") -> AsyncIterator[dic
     async with toolbox() as (session, specs):
         tracker = Tracker()
         if llm:
-            async for ev in _llm_loop(session, specs, tracker, alert_id, llm):
-                yield ev
+            events = _llm_loop(session, specs, tracker, alert_id, llm)
         else:
             from .playbook import run as playbook
-            async for ev in playbook(session, tracker, alert_id):
-                yield ev
+            events = playbook(session, tracker, alert_id)
+        checks, case_id, freeze_id = [], None, None
+        async for ev in events:
+            if ev["type"] == "result" and ev["name"] in ("open_case", "freeze_accounts", "close_alert") \
+                    and isinstance(ev.get("data"), dict) and "policies" in ev["data"]:
+                d = ev["data"]
+                case_id = d.get("case", case_id)
+                if ev["name"] == "freeze_accounts":
+                    freeze_id = d.get("action_id")
+                checks.append({"tool": ev["name"], "status": d.get("status", "done"), "action_id": d.get("action_id"),
+                               "policies": d["policies"]})
+            if ev["type"] == "verdict":
+                v = ev["verdict"]
+                v.setdefault("case_id", case_id)
+                v.setdefault("freeze_action_id", freeze_id)
+                v["policy_checks"] = checks
+                unverified = v.get("unverified_ids_removed") or []
+                policies.record_verdict(v["case_id"] or alert_id, unverified)
+                v["policy_checks"].append({"tool": "verdict", "status": "done", "policies": [{
+                    "policy": "POL-EVIDENCE-GROUNDED", "result": "pass" if not unverified else "fail",
+                    "detail": "every cited id was returned by a tool" if not unverified
+                    else f"{len(unverified)} unverified ids removed"}]})
+            yield ev
 
 
 async def _chat(http: httpx.AsyncClient, base: str, key: str, body: dict, retries: int = 6) -> httpx.Response:

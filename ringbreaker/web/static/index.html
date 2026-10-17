@@ -69,6 +69,19 @@
   select { background: var(--panel-2); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; padding: 5px; font: inherit; font-size: 12.5px; }
   .filter { display: flex; gap: 6px; padding: 8px 14px; border-bottom: 1px solid var(--line); }
   .filter button.on { border-color: var(--accent); color: var(--accent); }
+  .policies { margin-top: 10px; border-top: 1px solid var(--line); padding-top: 8px; }
+  .policies h4, .review h4 { margin: 0 0 6px; font-size: 12px; color: var(--quiet); font-weight: 600; text-transform: uppercase; letter-spacing: .4px; }
+  .pol { font-size: 12px; padding: 3px 0; display: flex; gap: 8px; }
+  .pol .r { font-weight: 700; font-size: 10.5px; min-width: 68px; text-transform: uppercase; }
+  .pol .r.pass { color: var(--good); } .pol .r.fail { color: var(--bad); } .pol .r.escalated { color: var(--warn); }
+  .pol .d { color: var(--quiet); }
+  .review { margin-top: 10px; border-top: 1px solid var(--line); padding-top: 8px; }
+  .review .row { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-size: 12px; flex-wrap: wrap; }
+  .review .row span { color: var(--quiet); flex: 1 1 100%; }
+  .review .res { font-size: 12px; color: var(--quiet); margin-top: 4px; }
+  .pchip { font-size: 11px; font-weight: 600; }
+  .pchip.pass { color: var(--good); } .pchip.fail { color: var(--bad); } .pchip.escalated { color: var(--warn); }
+  .ev .cal { display: block; color: var(--accent); font-size: 11px; }
 </style>
 </head>
 <body>
@@ -114,7 +127,7 @@ $('#legend').innerHTML = LABELS.map(l => `<span><i style="background:${css('--' 
 async function loadStatus() {
   const s = await (await fetch('/api/status')).json();
   $('#stats').innerHTML = `<span><b>${s.nodes.toLocaleString()}</b>graph nodes</span><span><b>${s.open}</b>open alerts</span>` +
-    `<span><b>${s.cases}</b>cases</span><span><b>${s.frozen}</b>frozen</span><span><b>${s.planner}</b></span>`;
+    `<span><b>${s.cases}</b>cases</span><span><b>${s.frozen}</b>frozen</span><span><b>${s.to_review ?? 0}</b>to review</span><span><b>${s.planner}</b></span>`;
 }
 
 async function loadAlerts() {
@@ -213,12 +226,18 @@ function summarize(name, d) {
     case 'find_cycles': return d.count ? d.cycles.map(c => `loop of ${new Set(c.accounts).size} accounts kept ${c.value_retained_pct}% in ${c.duration_days} days`).join('; ') : 'No loops.';
     case 'rank_roles': return d.accounts.map(a => `${a.account}: ${a.role}`).join(', ');
     case 'explain_connection': return d.connected ? d.paths.map(p => p.nodes.join(' → ')).join('<br>') : d.note;
-    case 'open_case': return `Opened ${d.case} with ${d.accounts} accounts.`;
+    case 'open_case': return `Opened ${d.case} with ${d.accounts} accounts.` + polLine(d.policies);
     case 'record_finding': return `Recorded ${d.finding}.`;
-    case 'freeze_accounts': return `${d.action.replace('_', ' ')} (${d.status}) on ${d.accounts.length} accounts.`;
-    case 'close_alert': return `Alert closed: ${d.disposition.replaceAll('_', ' ')}.`;
+    case 'freeze_accounts': return `${d.action.replace('_', ' ')} (${d.status.replaceAll('_', ' ')}) on ${d.accounts.length} accounts.` + polLine(d.policies);
+    case 'close_alert': return (d.status === 'done' ? `Alert closed: ${d.disposition.replaceAll('_', ' ')}.` : `Alert NOT closed (${d.status}).`) + polLine(d.policies);
+    case 'get_policies': return `${d.policies.length} active policies loaded.`;
+    case 'signal_calibration': { const moved = d.signals.filter(x => x.reviews); return moved.length ? `${moved.length} signals calibrated by analyst reviews.` : 'No analyst reviews yet: base weights.'; }
   }
   return '';
+}
+function polLine(ps) {
+  if (!ps || !ps.length) return '';
+  return '<br>' + ps.map(p => `<span class="pchip ${p.result}">${p.policy}: ${p.result}</span>`).join(' ');
 }
 const ACTIONS = new Set(['open_case', 'record_finding', 'freeze_accounts', 'close_alert']);
 function addStep(html, cls = '') {
@@ -236,11 +255,29 @@ function showVerdict(v) {
     <h3 style="margin-top:8px">${v.typology === 'none' ? 'No criminal pattern' : v.typology.replaceAll('_', ' ')}</h3>
     <div class="risk"><div style="width:${Math.round(v.risk * 100)}%;background:${color}"></div></div>
     <div class="tag">Risk ${v.risk.toFixed(2)} · ${v.ring_accounts.length} ring accounts${v.unverified_ids_removed?.length ? ` · ${v.unverified_ids_removed.length} unverified ids removed` : ''}</div>
-    ${(v.evidence || []).map((e, i) => `<div class="ev ${e.weight < 0 ? 'neg' : ''}" data-i="${i}">${e.weight != null ? `<span class="w">${e.weight > 0 ? '+' : ''}${e.weight}</span>` : ''}${e.claim}</div>`).join('')}
+    ${(v.evidence || []).map((e, i) => `<div class="ev ${e.weight < 0 ? 'neg' : ''}" data-i="${i}">${e.weight != null ? `<span class="w">${e.weight > 0 ? '+' : ''}${e.weight}</span>` : ''}${e.claim}${e.calibration ? `<span class="cal">${e.calibration}</span>` : ''}</div>`).join('')}
     ${v.roles?.length ? `<table class="roles"><tr><th>Account</th><th>Role</th><th>Betweenness</th><th>To high-risk</th></tr>${v.roles.map(r => `<tr><td>${r.account}</td><td>${r.role}</td><td>${r.betweenness}</td><td>${fmt(r.high_risk_spend)}</td></tr>`).join('')}</table>` : ''}
-    <div class="narr">${v.narrative}</div>`;
+    <div class="narr">${v.narrative}</div>
+    ${(v.policy_checks || []).length ? `<div class="policies"><h4>Policy checks</h4>${v.policy_checks.flatMap(c => c.policies.map(p =>
+      `<div class="pol"><span class="r ${p.result}">${p.result}</span><span><b>${p.policy}</b> <span class="d">(${c.tool}) ${p.detail}</span></span></div>`)).join('')}</div>` : ''}
+    ${v.case_id || v.freeze_action_id ? `<div class="review"><h4>Analyst review</h4>
+      ${v.case_id ? `<div class="row"><span>Case ${v.case_id}</span><button data-rv="case" data-d="confirm">Confirm case</button><button data-rv="case" data-d="overturn">Overturn case</button></div>` : ''}
+      ${v.freeze_action_id ? `<div class="row"><span>Freeze ${v.freeze_action_id} (${(v.policy_checks.find(c => c.tool === 'freeze_accounts') || {}).status?.replaceAll('_', ' ') || ''})</span><button data-rv="action" data-d="approve">Approve freeze</button><button data-rv="action" data-d="reject">Reject freeze</button></div>` : ''}
+      <div class="res"></div></div>` : ''}`;
   $('#side').prepend(box);
   box.querySelectorAll('.ev').forEach(el => el.onclick = () => highlight(v.evidence[el.dataset.i].entities));
+  box.querySelectorAll('[data-rv]').forEach(b => b.onclick = async () => {
+    const isCase = b.dataset.rv === 'case', id = isCase ? v.case_id : v.freeze_action_id;
+    const note = prompt(`Note for this decision (${b.dataset.d}):`, '') ?? '';
+    const r = await fetch(`/api/${isCase ? 'cases' : 'actions'}/${id}/review`, { method: 'POST',
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ decision: b.dataset.d, note }) });
+    const j = await r.json();
+    box.querySelector('.res').textContent = r.ok
+      ? `${id}: ${j.status}${j.unfrozen?.length ? `, unfrozen ${j.unfrozen.length}` : ''}${j.frozen ? `, frozen ${j.frozen.length}` : ''}${j.override ? ' (analyst override)' : ''}. Recorded as ${j.review}.`
+      : `Not recorded: ${j.detail}`;
+    if (r.ok) b.parentElement.querySelectorAll('button').forEach(x => x.disabled = true);
+    loadAlerts(); loadStatus();
+  });
   const ring = new Set(v.ring_accounts);
   cy.nodes().filter(n => ring.has(n.id())).addClass('ring');
 }
