@@ -15,8 +15,10 @@ results, so every claim is backed by a path in the graph.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import re
 import sys
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
@@ -26,7 +28,7 @@ from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 
 PROVIDERS = {
-    "gemini": ("https://generativelanguage.googleapis.com/v1beta/openai", "GEMINI_API_KEY", "gemini-2.5-flash"),
+    "gemini": ("https://generativelanguage.googleapis.com/v1beta/openai", "GEMINI_API_KEY", "gemini-flash-lite-latest"),
     "groq": ("https://api.groq.com/openai/v1", "GROQ_API_KEY", "llama-3.3-70b-versatile"),
     "openrouter": ("https://openrouter.ai/api/v1", "OPENROUTER_API_KEY", "meta-llama/llama-3.3-70b-instruct:free"),
 }
@@ -113,7 +115,14 @@ async def call_tool(session: ClientSession, name: str, args: dict) -> dict:
     if res.structuredContent is not None:
         out = res.structuredContent
         return out.get("result", out) if isinstance(out, dict) and set(out) == {"result"} else out
-    return json.loads(res.content[0].text) if res.content else {}
+    text = "".join(getattr(c, "text", "") for c in res.content or [])
+    try:
+        out = json.loads(text) if text else {}
+    except json.JSONDecodeError:
+        out = {"error": text[:1000]}
+    if res.isError and not (isinstance(out, dict) and "error" in out):
+        out = {"error": text[:1000]}
+    return out
 
 
 class Tracker:
@@ -167,6 +176,18 @@ async def investigate(alert_id: str, planner: str = "auto") -> AsyncIterator[dic
                 yield ev
 
 
+async def _chat(http: httpx.AsyncClient, base: str, key: str, body: dict, retries: int = 6) -> httpx.Response:
+    """POST a chat completion, waiting out free-tier rate limits (HTTP 429 / 503) before giving up."""
+    for attempt in range(retries + 1):
+        resp = await http.post(f"{base}/chat/completions", headers={"Authorization": f"Bearer {key}"}, json=body)
+        if resp.status_code not in (429, 503) or attempt == retries:
+            resp.raise_for_status()
+            return resp
+        hint = resp.headers.get("retry-after") or (re.search(r"retry in ([\d.]+)s", resp.text) or [None, None])[1]
+        await asyncio.sleep(min(60.0, float(hint) + 1 if hint else 5.0 * 2 ** attempt))
+    return resp
+
+
 async def _llm_loop(session, specs, tracker, alert_id, llm):
     name, base, key, model = llm
     yield {"type": "step", "message": f"Planner: {name} / {model}. Tools discovered over MCP: {len(specs)}"}
@@ -176,10 +197,8 @@ async def _llm_loop(session, specs, tracker, alert_id, llm):
     async with httpx.AsyncClient(timeout=90) as http:
         for step in range(MAX_STEPS + 3):
             try:
-                resp = await http.post(f"{base}/chat/completions", headers={"Authorization": f"Bearer {key}"},
-                                       json={"model": model, "messages": messages, "tools": tools,
-                                             "tool_choice": "auto", "temperature": 0.1})
-                resp.raise_for_status()
+                resp = await _chat(http, base, key, {"model": model, "messages": messages, "tools": tools,
+                                                     "tool_choice": "auto", "temperature": 0.1})
             except httpx.HTTPError as e:
                 body = getattr(getattr(e, "response", None), "text", "")[:300]
                 yield {"type": "error", "message": f"LLM call failed: {e} {body}"}
