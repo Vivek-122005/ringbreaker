@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RingBreaker</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='6' fill='none' stroke='%23f0605d' stroke-width='3'/%3E%3C/svg%3E">
+<style>
+  :root {
+    --bg: #0f1216; --panel: #161b21; --panel-2: #1c232b; --line: #2a333d;
+    --ink: #e6ebf0; --quiet: #93a1af; --accent: #4f9cf7;
+    --bad: #f0605d; --warn: #f2b33d; --good: #3fbf7f;
+    --Account: #4f9cf7; --Person: #b48cf2; --Device: #f2b33d; --IP: #e9853c; --Phone: #3fc1c9;
+    --Address: #9aa7b3; --Merchant: #e45d9b; --Alert: #f0605d; --Case: #3fbf7f; --Finding: #3fbf7f;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.45 Inter, system-ui, -apple-system, Segoe UI, sans-serif; height: 100vh; display: flex; flex-direction: column; }
+  header { display: flex; align-items: center; gap: 16px; padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  header h1 { font-size: 17px; margin: 0; letter-spacing: .2px; }
+  header h1 span { color: var(--bad); }
+  .tag { color: var(--quiet); font-size: 12.5px; }
+  .stats { margin-left: auto; display: flex; gap: 18px; font-size: 12.5px; color: var(--quiet); }
+  .stats b { color: var(--ink); font-size: 14px; margin-right: 4px; }
+  button { background: var(--panel-2); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; cursor: pointer; font: inherit; font-size: 12.5px; }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  button:disabled { opacity: .5; cursor: default; }
+  main { flex: 1; display: grid; grid-template-columns: 300px 1fr 400px; min-height: 0; }
+  section { min-height: 0; display: flex; flex-direction: column; border-right: 1px solid var(--line); }
+  section:last-child { border-right: 0; }
+  .head { padding: 10px 14px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 13px; }
+  .head .sub { color: var(--quiet); font-weight: 400; margin-left: auto; font-size: 12px; }
+  .scroll { overflow: auto; flex: 1; }
+  .alert { padding: 9px 14px; border-bottom: 1px solid var(--line); cursor: pointer; }
+  .alert:hover, .alert.sel { background: var(--panel-2); }
+  .alert .row1 { display: flex; gap: 8px; align-items: center; }
+  .alert .id { font-weight: 600; font-size: 13px; }
+  .rule { font-size: 11px; padding: 1px 6px; border-radius: 4px; background: #23303d; color: #9cc6f7; }
+  .alert .who { color: var(--quiet); font-size: 12px; margin-top: 2px; }
+  .disp { margin-left: auto; font-size: 11px; color: var(--quiet); }
+  .disp.false_positive { color: var(--good); } .disp.escalated_to_case, .disp.covered_by_case { color: var(--bad); }
+  #graph { flex: 1; min-height: 0; }
+  .legend { display: flex; flex-wrap: wrap; gap: 10px; padding: 8px 14px; border-top: 1px solid var(--line); font-size: 11.5px; color: var(--quiet); }
+  .legend i { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 4px; vertical-align: middle; }
+  .empty { color: var(--quiet); padding: 24px; text-align: center; }
+  .step { padding: 8px 14px; border-bottom: 1px solid var(--line); font-size: 12.5px; }
+  .step .t { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--accent); }
+  .step .a { color: var(--quiet); font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; word-break: break-all; }
+  .step .s { margin-top: 3px; }
+  .step.thought { color: var(--quiet); font-style: italic; }
+  .step.error, .step.validation { color: var(--warn); }
+  .step.action .t { color: var(--good); }
+  .verdict { padding: 14px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  .verdict h3 { margin: 0 0 6px; font-size: 15px; }
+  .outcome { display: inline-block; font-weight: 700; font-size: 12px; padding: 2px 8px; border-radius: 4px; letter-spacing: .3px; text-transform: uppercase; }
+  .outcome.ring_confirmed { background: rgba(240,96,93,.18); color: var(--bad); }
+  .outcome.suspicious_needs_review { background: rgba(242,179,61,.18); color: var(--warn); }
+  .outcome.false_positive { background: rgba(63,191,127,.18); color: var(--good); }
+  .risk { height: 6px; background: var(--panel-2); border-radius: 3px; margin: 8px 0; overflow: hidden; }
+  .risk div { height: 100%; }
+  .ev { padding: 6px 8px; border-left: 3px solid var(--line); margin: 6px 0; cursor: pointer; font-size: 12.5px; }
+  .ev:hover { border-left-color: var(--accent); background: var(--panel-2); }
+  .ev.neg { border-left-color: var(--good); }
+  .ev .w { float: right; color: var(--quiet); font-size: 11px; }
+  .narr { color: var(--quiet); font-size: 12.5px; margin-top: 8px; }
+  .roles { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px; }
+  .roles td, .roles th { text-align: left; padding: 3px 4px; border-bottom: 1px solid var(--line); }
+  .roles th { color: var(--quiet); font-weight: 500; }
+  select { background: var(--panel-2); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; padding: 5px; font: inherit; font-size: 12.5px; }
+  .filter { display: flex; gap: 6px; padding: 8px 14px; border-bottom: 1px solid var(--line); }
+  .filter button.on { border-color: var(--accent); color: var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Ring<span>Breaker</span></h1>
+  <span class="tag">Financial-crime investigator on FalkorDB</span>
+  <div class="stats" id="stats"></div>
+  <select id="planner" title="Planner">
+    <option value="auto">Planner: auto</option>
+    <option value="llm">Planner: LLM</option>
+    <option value="playbook">Planner: playbook</option>
+  </select>
+  <button id="reset" title="Rebuild the demo bank">Reset demo</button>
+</header>
+<main>
+  <section>
+    <div class="head">Alert queue <span class="sub" id="qcount"></span></div>
+    <div class="filter">
+      <button data-f="open" class="on">Open</button><button data-f="closed">Closed</button><button data-f="all">All</button>
+    </div>
+    <div class="scroll" id="alerts"></div>
+  </section>
+  <section>
+    <div class="head"><span id="gtitle">Evidence graph</span>
+      <span class="sub"><button id="go" class="primary" disabled>Investigate</button></span></div>
+    <div id="graph"><div class="empty">Pick an alert, then press Investigate. The agent's path through the graph appears here as it works.</div></div>
+    <div class="legend" id="legend"></div>
+  </section>
+  <section>
+    <div class="head">Investigation <span class="sub" id="steps-n"></span></div>
+    <div class="scroll" id="side"></div>
+  </section>
+</main>
+<script src="/static/vendor/cytoscape.min.js"></script>
+<script>
+const $ = s => document.querySelector(s);
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const LABELS = ['Account','Person','Device','IP','Phone','Address','Merchant','Alert','Case','Finding'];
+let selected = null, filter = 'open', alertsCache = [], cy = null, running = false, steps = 0;
+
+$('#legend').innerHTML = LABELS.map(l => `<span><i style="background:${css('--' + l)}"></i>${l}</span>`).join('');
+
+async function loadStatus() {
+  const s = await (await fetch('/api/status')).json();
+  $('#stats').innerHTML = `<span><b>${s.nodes.toLocaleString()}</b>graph nodes</span><span><b>${s.open}</b>open alerts</span>` +
+    `<span><b>${s.cases}</b>cases</span><span><b>${s.frozen}</b>frozen</span><span><b>${s.planner}</b></span>`;
+}
+
+async function loadAlerts() {
+  alertsCache = await (await fetch('/api/alerts')).json();
+  renderAlerts();
+}
+function renderAlerts() {
+  const list = alertsCache.filter(a => filter === 'all' || a.status === filter);
+  $('#qcount').textContent = `${list.length} shown`;
+  $('#alerts').innerHTML = list.map(a => `
+    <div class="alert ${a.id === selected ? 'sel' : ''}" data-id="${a.id}">
+      <div class="row1"><span class="id">${a.id}</span><span class="rule">${a.rule}</span>
+        ${a.disposition ? `<span class="disp ${a.disposition}">${a.disposition.replaceAll('_', ' ')}</span>` : ''}</div>
+      <div class="who">${a.account} · ${a.owner}${a.account_status === 'frozen' ? ' · <span style="color:var(--bad)">frozen</span>' : ''}</div>
+      <div class="who">${a.detail || ''}</div>
+    </div>`).join('') || '<div class="empty">Nothing here.</div>';
+  document.querySelectorAll('.alert').forEach(el => el.onclick = () => select(el.dataset.id));
+}
+function select(id) {
+  if (running) return;
+  selected = id; renderAlerts();
+  $('#go').disabled = false;
+  $('#gtitle').textContent = `Evidence graph · ${id}`;
+}
+document.querySelectorAll('.filter button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('.filter button').forEach(x => x.classList.remove('on'));
+  b.classList.add('on'); filter = b.dataset.f; renderAlerts();
+});
+
+function newGraph() {
+  $('#graph').innerHTML = '';
+  cy = cytoscape({
+    container: $('#graph'),
+    style: [
+      { selector: 'node', style: { 'background-color': n => css('--' + n.data('label')) || '#888', 'label': 'data(short)',
+          'color': css('--quiet'), 'font-size': 8, 'min-zoomed-font-size': 7, 'text-valign': 'bottom', 'text-margin-y': 3, 'width': 16, 'height': 16 } },
+      { selector: 'node[label = "Account"]', style: { 'shape': 'round-rectangle', 'width': 20, 'height': 14 } },
+      { selector: 'node[label = "Merchant"]', style: { 'shape': 'diamond' } },
+      { selector: 'node[label = "Case"], node[label = "Finding"], node[label = "Alert"]', style: { 'shape': 'star' } },
+      { selector: 'node[status = "frozen"]', style: { 'border-width': 3, 'border-color': css('--bad') } },
+      { selector: 'node.seed', style: { 'width': 26, 'height': 20, 'border-width': 3, 'border-color': '#fff' } },
+      { selector: 'node.ring', style: { 'border-width': 3, 'border-color': css('--bad'), 'color': css('--ink') } },
+      { selector: 'node.hl', style: { 'border-width': 4, 'border-color': '#fff', 'color': '#fff', 'font-size': 11, 'z-index': 9 } },
+      { selector: 'edge', style: { 'width': 1, 'line-color': css('--line'), 'target-arrow-color': css('--line'),
+          'target-arrow-shape': 'triangle', 'arrow-scale': .6, 'curve-style': 'bezier', 'opacity': .9 } },
+      { selector: 'edge[rel = "TRANSFER"]', style: { 'line-color': '#4f7fb8', 'target-arrow-color': '#4f7fb8', 'width': 1.6 } },
+      { selector: 'edge.fresh', style: { 'line-color': css('--warn'), 'target-arrow-color': css('--warn'), 'width': 2.5 } },
+      { selector: 'edge.hl', style: { 'line-color': '#fff', 'target-arrow-color': '#fff', 'width': 3, 'z-index': 9 } },
+    ],
+    layout: { name: 'preset' }, 
+  });
+}
+function addNodes(nodes) {
+  for (const n of nodes || []) {
+    if (['Case', 'Finding', 'Alert'].includes(n.label)) continue;  // shown in the timeline, not the graph
+    if (cy.getElementById(n.id).length) { cy.getElementById(n.id).data('status', n.status); continue; }
+    cy.add({ group: 'nodes', data: { id: n.id, label: n.label, status: n.status,
+      short: n.label === 'Account' || n.label === 'Device' ? n.id : (n.caption || n.id).slice(0, 22) } });
+  }
+}
+function addEdges(edges) {
+  cy.edges().removeClass('fresh');
+  for (const [s, rel, t] of edges || []) {
+    const id = `${s}|${rel}|${t}`;
+    if (cy.getElementById(id).length || !cy.getElementById(s).length || !cy.getElementById(t).length) {
+      cy.getElementById(id).addClass('fresh'); continue;
+    }
+    cy.add({ group: 'edges', data: { id, source: s, target: t, rel } }).addClass('fresh');
+  }
+}
+let layoutTimer = null;
+function relayout() {
+  clearTimeout(layoutTimer);
+  layoutTimer = setTimeout(() => cy.layout({ name: 'cose', animate: true, animationDuration: 500, nodeRepulsion: 9000,
+    idealEdgeLength: 60, randomize: false, fit: true, padding: 30 }).run(), 120);
+}
+function highlight(ids) {
+  cy.elements().removeClass('hl');
+  const set = new Set(ids);
+  cy.nodes().filter(n => set.has(n.id())).addClass('hl');
+  cy.edges().filter(e => set.has(e.source().id()) && set.has(e.target().id())).addClass('hl');
+}
+
+const fmt = n => typeof n === 'number' ? n.toLocaleString(undefined, { maximumFractionDigits: 0 }) : n;
+function summarize(name, d) {
+  if (!d) return '';
+  if (d.error) return `<span style="color:var(--warn)">${d.error}</span>`;
+  switch (name) {
+    case 'get_alert': return `${d.rule} on ${d.account}: ${d.detail}. ${d.other_alerts.length} other alert(s) on this account.`;
+    case 'account_profile': return `${d.owner_name}, account ${d.account_age_days_at_last_activity} days old. In ${fmt(d.total_in)} from ${d.senders}, out ${fmt(d.total_out)} to ${d.receivers}` +
+      (d.pass_through_ratio != null ? ` (pass-through ${Math.round(d.pass_through_ratio * 100)}%)` : '') + '.';
+    case 'prior_knowledge': return d.count ? `${d.count} entities already known from earlier cases.` : 'Nothing recorded yet.';
+    case 'shared_identifiers': return d.count ? d.shared.map(s => `${s.kind} ${s.identifier} shared with ${s.linked_count} (${s.distinct_surnames} surnames)`).join('; ') : 'No shared identity elements.';
+    case 'identity_cluster': return `WCC cluster of ${d.cluster_size} accounts, ${d.distinct_owner_surnames} owner surnames, opened within ${d.opened_within_days} days.`;
+    case 'follow_money': return d.paths.length ? `${d.paths.length} time-ordered paths reaching ${d.distinct_accounts_reached} accounts.` : (d.note || 'No flow.');
+    case 'find_cycles': return d.count ? d.cycles.map(c => `loop of ${new Set(c.accounts).size} accounts kept ${c.value_retained_pct}% in ${c.duration_days} days`).join('; ') : 'No loops.';
+    case 'rank_roles': return d.accounts.map(a => `${a.account}: ${a.role}`).join(', ');
+    case 'explain_connection': return d.connected ? d.paths.map(p => p.nodes.join(' → ')).join('<br>') : d.note;
+    case 'open_case': return `Opened ${d.case} with ${d.accounts} accounts.`;
+    case 'record_finding': return `Recorded ${d.finding}.`;
+    case 'freeze_accounts': return `${d.action.replace('_', ' ')} (${d.status}) on ${d.accounts.length} accounts.`;
+    case 'close_alert': return `Alert closed: ${d.disposition.replaceAll('_', ' ')}.`;
+  }
+  return '';
+}
+const ACTIONS = new Set(['open_case', 'record_finding', 'freeze_accounts', 'close_alert']);
+function addStep(html, cls = '') {
+  const el = document.createElement('div');
+  el.className = 'step ' + cls; el.innerHTML = html;
+  $('#side').appendChild(el); $('#side').scrollTop = 1e9;
+  return el;
+}
+function showVerdict(v) {
+  const color = v.outcome === 'ring_confirmed' ? css('--bad') : v.outcome === 'false_positive' ? css('--good') : css('--warn');
+  const box = document.createElement('div');
+  box.className = 'verdict';
+  box.innerHTML = `
+    <span class="outcome ${v.outcome}">${v.outcome.replaceAll('_', ' ')}</span>
+    <h3 style="margin-top:8px">${v.typology === 'none' ? 'No criminal pattern' : v.typology.replaceAll('_', ' ')}</h3>
+    <div class="risk"><div style="width:${Math.round(v.risk * 100)}%;background:${color}"></div></div>
+    <div class="tag">Risk ${v.risk.toFixed(2)} · ${v.ring_accounts.length} ring accounts${v.unverified_ids_removed?.length ? ` · ${v.unverified_ids_removed.length} unverified ids removed` : ''}</div>
+    ${(v.evidence || []).map((e, i) => `<div class="ev ${e.weight < 0 ? 'neg' : ''}" data-i="${i}">${e.weight != null ? `<span class="w">${e.weight > 0 ? '+' : ''}${e.weight}</span>` : ''}${e.claim}</div>`).join('')}
+    ${v.roles?.length ? `<table class="roles"><tr><th>Account</th><th>Role</th><th>Betweenness</th><th>To high-risk</th></tr>${v.roles.map(r => `<tr><td>${r.account}</td><td>${r.role}</td><td>${r.betweenness}</td><td>${fmt(r.high_risk_spend)}</td></tr>`).join('')}</table>` : ''}
+    <div class="narr">${v.narrative}</div>`;
+  $('#side').prepend(box);
+  box.querySelectorAll('.ev').forEach(el => el.onclick = () => highlight(v.evidence[el.dataset.i].entities));
+  const ring = new Set(v.ring_accounts);
+  cy.nodes().filter(n => ring.has(n.id())).addClass('ring');
+}
+
+$('#go').onclick = () => {
+  if (!selected || running) return;
+  running = true; steps = 0; $('#go').disabled = true;
+  $('#side').innerHTML = ''; newGraph();
+  const es = new EventSource(`/api/investigate/${selected}?planner=${$('#planner').value}`);
+  let seed = null;
+  es.onmessage = m => {
+    const ev = JSON.parse(m.data);
+    if (ev.nodes) addNodes(ev.nodes);
+    if (ev.type === 'step') addStep(ev.message, 'thought');
+    else if (ev.type === 'thought') addStep(ev.message, 'thought');
+    else if (ev.type === 'validation' || ev.type === 'error') addStep(ev.message, ev.type);
+    else if (ev.type === 'tool') {
+      steps++; $('#steps-n').textContent = `${steps} tool calls`;
+      ev.el = addStep(`<div class="t">${ev.name}</div><div class="a">${(s => s.length > 160 ? s.slice(0, 160) + '…' : s)(JSON.stringify(ev.args))}</div>`, ACTIONS.has(ev.name) ? 'action' : '');
+      window._last = ev.el;
+    } else if (ev.type === 'result') {
+      if (ev.name === 'get_alert' && ev.data.account) { seed = ev.data.account; }
+      addEdges(ev.evidence?.edges);
+      if (seed) cy.getElementById(seed).addClass('seed');
+      if (window._last) window._last.insertAdjacentHTML('beforeend', `<div class="s">${summarize(ev.name, ev.data)}</div>`);
+      if (ev.evidence?.nodes?.length) { window._last && (window._last.onclick = () => highlight(ev.evidence.nodes)); }
+      relayout();
+    } else if (ev.type === 'verdict') {
+      addEdges(ev.graph); cy.edges().removeClass('fresh'); relayout(); showVerdict(ev.verdict); $('#side').scrollTop = 0;
+    } else if (ev.type === 'done') {
+      es.close(); running = false; $('#go').disabled = false; loadAlerts(); loadStatus();
+    }
+  };
+  es.onerror = () => { es.close(); running = false; $('#go').disabled = false; addStep('Connection lost.', 'error'); };
+};
+$('#reset').onclick = async () => {
+  if (running || !confirm('Rebuild the demo bank? This clears all cases, findings and freezes.')) return;
+  $('#reset').disabled = true; $('#reset').textContent = 'Rebuilding…';
+  await fetch('/api/reset', { method: 'POST' });
+  $('#reset').disabled = false; $('#reset').textContent = 'Reset demo';
+  selected = null; $('#side').innerHTML = ''; loadAlerts(); loadStatus();
+};
+loadStatus(); loadAlerts();
+</script>
+</body>
+</html>
