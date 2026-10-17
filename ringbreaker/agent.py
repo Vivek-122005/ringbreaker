@@ -119,10 +119,20 @@ async def call_tool(session: ClientSession, name: str, args: dict) -> dict:
     try:
         out = json.loads(text) if text else {}
     except json.JSONDecodeError:
-        out = {"error": text[:1000]}
+        out = {"error": _short_error(name, text)}
     if res.isError and not (isinstance(out, dict) and "error" in out):
-        out = {"error": text[:1000]}
+        out = {"error": _short_error(name, text)}
     return out
+
+
+def _short_error(tool: str, text: str) -> str:
+    """Turn an argument-validation dump into one line the planner (and the analyst) can act on."""
+    problems = re.findall(r"\n(\w+)\n\s+(.+?) \[type=", text)
+    if problems:
+        return f"{tool}: " + "; ".join(
+            f"missing argument {field}" if msg.startswith("Field required") else f"invalid argument {field} ({msg})"
+            for field, msg in problems)
+    return text.removeprefix(f"Error executing tool {tool}: ")[:500]
 
 
 class Tracker:

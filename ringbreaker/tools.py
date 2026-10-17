@@ -388,10 +388,14 @@ def record_finding(case_id: str, entity_ids: list[str], text: str) -> dict:
     return {"data": {"finding": fid}, "evidence": _ev([fid] + ids)}
 
 
-def freeze_accounts(case_id: str, account_ids: list[str], reason: str) -> dict:
+def freeze_accounts(case_id: str, account_ids: list[str] | None = None, reason: str = "") -> dict:
     """Freeze outgoing payments on accounts in a case. Only allowed for cases with risk >= 0.8
-    (bank policy); otherwise the request is recorded as a recommendation for an analyst."""
+    (bank policy); otherwise the request is recorded as a recommendation for an analyst.
+    If account_ids is omitted, every account in the case is frozen."""
     _resolve(case_id, "Case")
+    if not account_ids:
+        account_ids = [r["id"] for r in db.read(
+            "MATCH (:Case {id: $id})-[:INCLUDES]->(a:Account) RETURN a.id AS id", {"id": case_id})]
     ids = _accounts(account_ids)
     risk = db.read("MATCH (c:Case {id: $id}) RETURN c.risk AS r", {"id": case_id})[0]["r"]
     if risk < 0.8:
