@@ -594,6 +594,7 @@ Settings come from environment variables. They can also be put in a `.env` file 
 | `FALKORDB_HOST` | unset | FalkorDB host. Unset means embedded falkordblite. |
 | `FALKORDB_PORT` | 6379 | Port |
 | `FALKORDB_USERNAME`, `FALKORDB_PASSWORD` | unset | For FalkorDB Cloud |
+| `FALKORDB_SSL` | unset | `true` to connect over TLS (FalkorDB Cloud instances that require it) |
 | `RB_GRAPH` | ringbreaker | Graph name |
 | `FALKORDB_LITE_PATH` | data/ringbreaker.db | Embedded database file |
 | `GEMINI_API_KEY` / `GROQ_API_KEY` / `OPENROUTER_API_KEY` | unset | Enables the LLM planner |

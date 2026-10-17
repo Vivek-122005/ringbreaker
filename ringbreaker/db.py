@@ -15,7 +15,8 @@ def _client():
         from falkordb import FalkorDB
         return FalkorDB(host=host, port=int(os.getenv("FALKORDB_PORT", "6379")),
                         username=os.getenv("FALKORDB_USERNAME") or None,
-                        password=os.getenv("FALKORDB_PASSWORD") or None)
+                        password=os.getenv("FALKORDB_PASSWORD") or None,
+                        ssl=os.getenv("FALKORDB_SSL", "").lower() in ("1", "true", "yes"))
     from redislite.falkordb_client import FalkorDB
     return FalkorDB(os.getenv("FALKORDB_LITE_PATH", "data/ringbreaker.db"))
 

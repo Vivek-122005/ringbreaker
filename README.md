@@ -214,7 +214,7 @@ export GEMINI_API_KEY=...        # or GROQ_API_KEY / OPENROUTER_API_KEY
 export RB_LLM_PROVIDER=gemini    # optional; RB_MODEL overrides the model name
 ```
 
-FalkorDB Cloud: set `FALKORDB_HOST`, `FALKORDB_PORT`, `FALKORDB_USERNAME` and `FALKORDB_PASSWORD` to your instance.
+FalkorDB Cloud: set `FALKORDB_HOST`, `FALKORDB_PORT`, `FALKORDB_USERNAME` and `FALKORDB_PASSWORD` to your instance, and `FALKORDB_SSL=true` if the instance requires TLS. These can go in a git-ignored `.env` file in the project root.
 
 Use the MCP server from any MCP client:
 
