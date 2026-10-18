@@ -4,6 +4,10 @@
 
 Hackathon track: **Track 01: Agents That Act on Connected Data** (Graph Hacks by WeMakeDevs × FalkorDB).
 
+**Live demo: https://ringbreaker-ztdb.onrender.com** (free hosting: the first visit after a quiet spell can take about a minute to wake up). Pick an alert, press **Investigate**, and watch the agent work through the graph. Set the planner to *playbook* for the deterministic run.
+
+Docs: [architecture](docs/ARCHITECTURE.md) · [policies and analyst feedback](docs/FEEDBACK_AND_POLICIES.md)
+
 ---
 
 ## The problem
@@ -51,6 +55,31 @@ These are results for the deterministic playbook planner. On every seed, a singl
 
 ## Graph data model
 
+```mermaid
+graph LR
+    Person -- OWNS --> Account
+    Person -- HAS_PHONE --> Phone
+    Person -- LIVES_AT --> Address
+    Account -- USED_DEVICE --> Device
+    Account -- ACCESSED_FROM --> IP
+    Account -- "TRANSFER {amount, ts, channel}" --> Account
+    Account -- "PAID {amount, ts}" --> Merchant
+    Alert -- FLAGS --> Account
+    Case -- RAISED_FROM --> Alert
+    Case -- INCLUDES --> Account
+    Case -- HAS_FINDING --> Finding
+    Finding -- ABOUT --> Account
+    Case -- TOOK --> Action
+    Action -- ON --> Account
+    Action -- "GOVERNED_BY {result, detail}" --> Policy
+    Review -- REVIEWS --> Case
+    Review -- REVIEWS --> Action
+    SignalStat
+    RuleStat
+```
+
+The bank's data (people, accounts, identity elements, money), the agent's work (alerts, cases, findings, actions) and the governance layer (policies, analyst reviews, learned tallies) all live in one graph.
+
 **Nodes**
 
 | Label | Key properties | Purpose |
@@ -65,7 +94,10 @@ These are results for the deterministic playbook planner. On every seed, a singl
 | `Alert` | rule, detail, status, disposition | Output of the alert rules; the agent's input |
 | `Case` | typology, risk, summary, status | Written by the agent for a confirmed ring |
 | `Finding` | text, created | Evidence the agent recorded; long-term memory |
-| `Action` | kind, status, reason | Audit trail of what the agent did |
+| `Action` | kind, status, reason | Audit trail of every action the agent took (case, freeze, closure, verdict check) |
+| `Policy` | name, applies_to, version, active, rationale, parameters | A must-follow rule, stored as data and enforced inside the action tools |
+| `Review` | decision, note, ts, reviewer | An analyst's confirm / overturn / approve / reject decision |
+| `SignalStat`, `RuleStat` | signal or rule, confirmed, overturned | What analyst reviews taught the agent about each evidence signal and alert rule |
 
 **Relationships**
 
@@ -82,7 +114,9 @@ These are results for the deterministic playbook planner. On every seed, a singl
 | `(Case)-[:RAISED_FROM]->(Alert)` | |
 | `(Case)-[:INCLUDES]->(Account)` | |
 | `(Case)-[:HAS_FINDING]->(Finding)-[:ABOUT]->(any)` | |
-| `(Case)-[:TOOK]->(Action)-[:ON]->(Account)` | |
+| `(Case)-[:TOOK]->(Action)-[:ON]->(Account \| Alert)` | |
+| `(Action)-[:GOVERNED_BY]->(Policy)` | result (pass / escalated / fail), detail, version |
+| `(Review)-[:REVIEWS]->(Case \| Action)` | |
 
 Identity elements are nodes, not properties, so "who else uses this device?" is one hop. Transfers are individual timestamped edges, so a money trace can require each hop to happen after the previous one. The agent's own output lives in the same graph, which is what gives it memory across sessions.
 
@@ -117,19 +151,20 @@ The answer key is written to `data/ground_truth.json` and is only read by the ev
 
 Every tool is a fixed query in `ringbreaker/tools.py`. Ids are resolved against the graph before any query runs, reads use `ro_query`, and every result carries `evidence` (node ids and edges).
 
-| Tool | Graph technique |
-| --- | --- |
-| `get_alert` | 1-hop match |
-| `account_profile` | Aggregation over `TRANSFER` and `PAID` (age, pass-through ratio, merchants) |
-| `prior_knowledge` | Earlier `Case` / `Finding` / frozen status on the entities |
-| `shared_identifiers` | 2-hop pivots through `Device`, `IP`, `Phone`, `Address` |
-| `identity_cluster` | `algo.WCC` over the identity subgraph |
-| `follow_money` | Variable-length, time-ordered `TRANSFER` paths |
-| `find_cycles` | `(a)-[:TRANSFER*2..7]->(a)` |
-| `rank_roles` | `algo.pageRank` + `algo.betweenness` + in-ring flows |
-| `explain_connection` | `algo.SPpaths` (either direction, ≤ 6 hops) |
-| `get_policies`, `signal_calibration` | The bank's active policies; signal weights and rule precision after analyst reviews |
-| `open_case`, `record_finding`, `freeze_accounts`, `close_alert` | Writes, each checked against the policies (see below) |
+| Tool | Cypher / algorithm | What it tells the agent |
+| --- | --- | --- |
+| `get_alert` | `MATCH (al:Alert {id})-[:FLAGS]->(a:Account)` plus other open alerts on `a` | What fired, on which account |
+| `account_profile` | Aggregation over `(a)<-[:TRANSFER]-()`, `(a)-[:TRANSFER]->()`, `(a)-[:PAID]->(:Merchant)` | Age, tenure, pass-through ratio, merchants |
+| `prior_knowledge` | `(:Finding)-[:ABOUT]->(n)`, `(:Case)-[:INCLUDES]->(n)` with case status | Known bad, or cleared by an analyst |
+| `shared_identifiers` | 2-hop pivots `(a)-[:USED_DEVICE]->(:Device)<-[:USED_DEVICE]-(b)`, same for `IP`, `Phone`, `Address` | Who else controls this account's identity elements |
+| `identity_cluster` | `CALL algo.WCC({nodeLabels, relationshipTypes: [OWNS, USED_DEVICE, HAS_PHONE, LIVES_AT]})` | The identity community the account belongs to |
+| `follow_money` | Variable-length `(a)-[:TRANSFER*1..3]->(x)` with `all(...)` time-order and window predicates | Where the money went (or came from), hop by hop in time |
+| `find_cycles` | `(a)-[:TRANSFER*2..6]->(a)` | Money loops and how much value survives them |
+| `rank_roles` | `CALL algo.pageRank('Account','TRANSFER')`, `CALL algo.betweenness(...)`, in-ring flow sums | Collector, layering, cash-out and sink roles |
+| `explain_connection` | `CALL algo.SPpaths({relDirection: 'both', maxLen: 6})` | How two entities are connected |
+| `get_policies` | `MATCH (p:Policy {active: true})` | The rules its actions will be checked against |
+| `signal_calibration` | `MATCH (s:SignalStat)`, `MATCH (s:RuleStat)` | Signal weights and rule precision after analyst reviews |
+| `open_case`, `record_finding`, `freeze_accounts`, `close_alert` | `CREATE` / `SET` writes, each preceded by policy-check queries | Act: open a case, record evidence, freeze, close |
 
 ### Key Cypher
 
@@ -181,6 +216,45 @@ MATCH (a {id: $a}), (b {id: $b})
 CALL algo.SPpaths({sourceNode: a, targetNode: b, relDirection: 'both', maxLen: 6, pathCount: 3})
 YIELD path
 ```
+
+## Where the decisions come from the graph
+
+Every point of risk the playbook adds, and every policy check, is the result of a specific graph query. Nothing is decided outside the graph.
+
+**Verdict signals** (`ringbreaker/playbook.py`, weights calibrated by analyst reviews)
+
+| Signal | Weight | Comes from | Graph technique |
+| --- | --- | --- | --- |
+| Pass-through account (new / old) | +0.20 / +0.05 | `account_profile` | Aggregation over `TRANSFER` in and out |
+| Long-standing customer | −0.15 | `account_profile` | KYC date and account age |
+| Already in an earlier case | +0.30 | `prior_knowledge` | `(:Case)-[:INCLUDES]->(n)`, `(:Finding)-[:ABOUT]->(n)` |
+| Cleared by an analyst | −0.30 | `prior_knowledge` | `(:Case {status: 'overturned'})-[:INCLUDES]->(n)` |
+| VPN / hosting IP or emulator shared with strangers | +0.25 | `shared_identifiers` | 2-hop identity pivot, surname comparison |
+| Device shared with unrelated customers | +0.20 | `shared_identifiers` | `(a)-[:USED_DEVICE]->(d)<-[:USED_DEVICE]-(b)` |
+| Phone or address shared across surnames | +0.15 | `shared_identifiers` | `(p)-[:HAS_PHONE\|LIVES_AT]->(x)<-[...]-(q)` |
+| Identifiers shared only within one household | −0.10 | `shared_identifiers` | Same pivots, same surname |
+| Identity cluster of 4+ accounts, 3+ owners, opened within 30 days | +0.20 | `identity_cluster` | **WCC** (`algo.WCC`) |
+| Structuring into sub-10,000 splits | +0.15 | `follow_money` | **Variable-length paths**, time-ordered |
+| Money moved within hours through identity-linked accounts | +0.15 | `follow_money` + `shared_identifiers` | Variable-length paths ∩ identity pivots |
+| 5+ payers into a new account (likely scam victims) | +0.15 | `follow_money` (direction in) | Variable-length paths, reversed |
+| Loop returning ≥ 90% of value | +0.60 | `find_cycles` | **Cycles** `(a)-[:TRANSFER*2..6]->(a)` |
+| Ring money leaving via crypto / gift cards / remittance | +0.20 | `rank_roles` | **PageRank** + **betweenness** roles, `PAID` to high-risk merchants |
+
+Risk ≥ 0.8 means ring confirmed; 0.5 to 0.8 means suspicious, for an analyst; below 0.5 means false positive. When analysts ask *how* two flagged entities are linked, `explain_connection` answers with **SPpaths** (`algo.SPpaths`).
+
+**Policy checks** (`ringbreaker/policies.py`, enforced inside the action tools)
+
+| Policy | Checked with |
+| --- | --- |
+| POL-FREEZE-RISK | `MATCH (c:Case {id}) RETURN c.risk` |
+| POL-FREEZE-EVIDENCE | `(c)-[:HAS_FINDING]->(f:Finding)`: count and distinct `f.family` |
+| POL-RESPECT-ANALYST | `(:Case {status:'overturned'})-[:INCLUDES]->(a)` and `(:Review {decision:'reject'})-[:REVIEWS]->(:Action)-[:ON]->(a)` |
+| POL-HUMAN-REVIEW | Number of accounts in the freeze |
+| POL-CASE-CONNECTED | Bounded breadth-first search over `OWNS\|USED_DEVICE\|ACCESSED_FROM\|HAS_PHONE\|LIVES_AT\|TRANSFER`, ≤ 4 hops from the alerted account |
+| POL-FP-REASON | `MATCH (n) WHERE n.id IN $ids_cited_in_reason` |
+| POL-EVIDENCE-GROUNDED | Every cited id must appear in a tool's returned evidence |
+
+Each result is written back as `(Action)-[:GOVERNED_BY {result, detail}]->(Policy)`, so the audit trail is itself queryable.
 
 ## The agent
 
