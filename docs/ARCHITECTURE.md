@@ -160,7 +160,7 @@ sequenceDiagram
     U->>W: Click alert, press Investigate
     W->>A: investigate(alert_id)
     A->>M: start over stdio, list_tools
-    M-->>A: 13 tool definitions
+    M-->>A: 15 tool definitions
     loop Each investigation step
         A->>M: call_tool(name, args)
         M->>G: fixed Cypher / algorithm
@@ -383,7 +383,7 @@ The tool catalogue is published as an **MCP server** using the official `mcp` Py
 
 Why put an MCP server in between instead of calling the functions directly?
 
-- **One fixed surface.** Every client, whether the RingBreaker agent, an IDE or a desktop app, gets the same 13 reviewed tools and nothing else. There is no "run arbitrary Cypher" tool.
+- **One fixed surface.** Every client, whether the RingBreaker agent, an IDE or a desktop app, gets the same 15 reviewed tools and nothing else. There is no "run arbitrary Cypher" tool.
 - **Tool discovery.** The agent does not hard-code the tool list. It asks the server at runtime, so adding a tool to `tools.py` makes it available everywhere.
 - **Reuse.** Other teams' agents could investigate the same graph through the same tools.
 

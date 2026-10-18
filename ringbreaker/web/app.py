@@ -10,10 +10,11 @@ import os
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from .. import db
+from .. import db, learning, policies, review
 from ..agent import investigate, provider
 
 app = FastAPI(title="RingBreaker")
@@ -46,6 +47,8 @@ def status():
         OPTIONAL MATCH (a:Account {status: 'frozen'})
         RETURN alerts, toInteger(open) AS open, cases, count(a) AS frozen""")[0]
     stats = db.read("MATCH (n) RETURN count(n) AS nodes")[0]
+    stats["to_review"] = db.read("MATCH (c:Case {status: 'open'}) RETURN count(c) AS n")[0]["n"] + \
+        db.read("MATCH (x:Action {status: 'pending_analyst'}) RETURN count(x) AS n")[0]["n"]
     return {"planner": f"{p[0]} / {p[3]}" if p else "playbook", "llm": bool(p), **counts, **stats}
 
 
@@ -64,7 +67,42 @@ def cases():
         MATCH (c:Case)-[:RAISED_FROM]->(al:Alert)
         OPTIONAL MATCH (c)-[:INCLUDES]->(a:Account)
         RETURN c.id AS id, c.typology AS typology, c.risk AS risk, c.summary AS summary, al.id AS alert,
-               count(a) AS accounts ORDER BY c.created DESC""")
+               c.status AS status, count(a) AS accounts ORDER BY c.created DESC""")
+
+
+class Decision(BaseModel):
+    decision: str
+    note: str = ""
+
+
+@app.get("/api/policies")
+def get_policies():
+    return policies.active()
+
+
+@app.get("/api/learning")
+def get_learning():
+    return learning.calibration()
+
+
+@app.post("/api/cases/{case_id}/review")
+async def case_review(case_id: str, body: Decision):
+    """Analyst decision on a case: confirm or overturn (overturning reverses its freezes)."""
+    async with _lock:
+        try:
+            return await asyncio.to_thread(review.review_case, case_id, body.decision, body.note)
+        except review.ReviewError as e:
+            raise HTTPException(400, str(e))
+
+
+@app.post("/api/actions/{action_id}/review")
+async def action_review(action_id: str, body: Decision):
+    """Analyst decision on a freeze: approve (executes a pending one) or reject (reverses it)."""
+    async with _lock:
+        try:
+            return await asyncio.to_thread(review.review_action, action_id, body.decision, body.note)
+        except review.ReviewError as e:
+            raise HTTPException(400, str(e))
 
 
 @app.get("/api/investigate/{alert_id}")

@@ -30,7 +30,7 @@ Given an alert, the agent:
 flowchart LR
     G[Synthetic bank generator] --> DB[(FalkorDB graph)]
     R[Alert rules - Cypher] --> DB
-    DB <--> M[MCP server<br/>13 tools: Cypher, WCC,<br/>PageRank, betweenness, SPpaths]
+    DB <--> M[MCP server<br/>15 tools: Cypher, WCC,<br/>PageRank, betweenness, SPpaths]
     M <--> A[Investigator agent<br/>LLM or playbook planner<br/>+ evidence validator]
     A --> UI[Analyst console<br/>live steps + evidence graph]
     A --> E[Evaluation vs hidden ground truth]
@@ -128,7 +128,8 @@ Every tool is a fixed query in `ringbreaker/tools.py`. Ids are resolved against 
 | `find_cycles` | `(a)-[:TRANSFER*2..7]->(a)` |
 | `rank_roles` | `algo.pageRank` + `algo.betweenness` + in-ring flows |
 | `explain_connection` | `algo.SPpaths` (either direction, ≤ 6 hops) |
-| `open_case`, `record_finding`, `freeze_accounts`, `close_alert` | Writes; freezing requires case risk ≥ 0.8 |
+| `get_policies`, `signal_calibration` | The bank's active policies; signal weights and rule precision after analyst reviews |
+| `open_case`, `record_finding`, `freeze_accounts`, `close_alert` | Writes, each checked against the policies (see below) |
 
 ### Key Cypher
 
@@ -190,6 +191,14 @@ YIELD path
 
 Risk ≥ 0.8 means ring confirmed: open a case, record findings, freeze, escalate. Risk 0.5 to 0.8 means suspicious: open a case and recommend a freeze for an analyst. Below 0.5 means false positive: close the alert with the reason.
 
+## Policies and analyst feedback
+
+Every action the agent takes is checked server-side against must-follow policies stored in the graph as `Policy` nodes: high risk and corroborated evidence for a freeze, analyst approval for large or previously cleared freezes, connected accounts for a case, and a cited graph fact for a false-positive closure. Each check is recorded as `(Action)-[:GOVERNED_BY]->(Policy)`.
+
+Analysts confirm or overturn cases and approve or reject freezes from the console. Their decisions are stored as `Review` nodes, reverse freezes when needed, and calibrate the playbook's signal weights within fixed bounds. `python -m ringbreaker.evaluate --simulate-feedback` measures the effect.
+
+Details: [docs/FEEDBACK_AND_POLICIES.md](docs/FEEDBACK_AND_POLICIES.md).
+
 ## Run it locally
 
 Requirements: Docker and Python 3.11 or newer.
@@ -246,6 +255,9 @@ ringbreaker/
   mcp_server.py   MCP server exposing the tools
   agent.py        MCP client, LLM planner, verdict validation
   playbook.py     deterministic planner and risk score
+  policies.py     must-follow policies and their server-side checks
+  review.py       analyst confirm / overturn / approve / reject
+  learning.py     review tallies and bounded signal calibration
   evaluate.py     scoring against ground truth
   web/            FastAPI analyst console (SSE + cytoscape.js)
 ```
