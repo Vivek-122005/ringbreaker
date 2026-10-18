@@ -146,6 +146,11 @@ $('#legend').innerHTML = LABELS.map(l => `<span><i style="background:${css('--' 
 
 async function loadStatus() {
   const s = await (await fetch('/api/status')).json();
+  if (s.rebuilding) {
+    $('#stats').innerHTML = '<span><b>…</b>rebuilding the demo bank</span>';
+    if (!rebuilding) { setRebuilding(true); waitForRebuild().then(() => { setRebuilding(false); loadAlerts(); loadStatus(); }); }
+    return;
+  }
   $('#stats').innerHTML = `<span><b>${s.nodes.toLocaleString()}</b>graph nodes</span><span><b>${s.open}</b>open alerts</span>` +
     `<span><b>${s.cases}</b>cases</span><span><b>${s.frozen}</b>frozen</span><span><b>${s.to_review ?? 0}</b>to review</span><span><b>${s.planner}</b></span>`;
 }
@@ -169,7 +174,7 @@ function renderAlerts() {
 function select(id) {
   if (running) return;
   selected = id; renderAlerts();
-  $('#go').disabled = false;
+  $('#go').disabled = rebuilding;
   $('#gtitle').textContent = `Evidence graph · ${id}`;
 }
 document.querySelectorAll('.filter button').forEach(b => b.onclick = () => {
@@ -311,7 +316,7 @@ $('#go').onclick = () => {
   running = true; steps = 0; $('#go').disabled = true;
   $('#side').innerHTML = ''; newGraph();
   const es = new EventSource(`/api/investigate/${selected}?planner=${$('#planner').value}`);
-  let seed = null;
+  let seed = null, gotVerdict = false;
   es.onmessage = m => {
     const ev = JSON.parse(m.data);
     if (ev.nodes) addNodes(ev.nodes);
@@ -330,19 +335,43 @@ $('#go').onclick = () => {
       if (ev.evidence?.nodes?.length) { window._last && (window._last.onclick = () => highlight(ev.evidence.nodes)); }
       relayout();
     } else if (ev.type === 'verdict') {
-      addEdges(ev.graph); cy.edges().removeClass('fresh'); relayout(); showVerdict(ev.verdict); $('#side').scrollTop = 0;
+      gotVerdict = true; addEdges(ev.graph); cy.edges().removeClass('fresh'); relayout(); showVerdict(ev.verdict); $('#side').scrollTop = 0;
     } else if (ev.type === 'done') {
       es.close(); running = false; $('#go').disabled = false; loadAlerts(); loadStatus();
     }
   };
-  es.onerror = () => { es.close(); running = false; $('#go').disabled = false; addStep('Connection lost.', 'error'); };
+  es.onerror = () => {
+    es.close(); running = false; $('#go').disabled = !selected || rebuilding;
+    if (!gotVerdict) addStep('Connection lost. Click Investigate to retry.', 'error');
+  };
 };
+let rebuilding = false;
+function setRebuilding(on) {
+  rebuilding = on;
+  $('#reset').disabled = on; $('#reset').textContent = on ? 'Rebuilding…' : 'Reset demo';
+  $('#go').disabled = on || !selected || running;
+}
+async function waitForRebuild() {
+  for (let i = 0; i < 120; i++) {  // up to ~4 minutes
+    try {
+      const s = await (await fetch('/api/status')).json();
+      if (!s.rebuilding) return;
+    } catch (e) { /* server busy or waking up: keep polling */ }
+    await new Promise(r => setTimeout(r, 2000));
+  }
+}
 $('#reset').onclick = async () => {
-  if (running || !confirm('Rebuild the demo bank? This clears all cases, findings and freezes.')) return;
-  $('#reset').disabled = true; $('#reset').textContent = 'Rebuilding…';
-  await fetch('/api/reset', { method: 'POST' });
-  $('#reset').disabled = false; $('#reset').textContent = 'Reset demo';
-  selected = null; $('#side').innerHTML = ''; loadAlerts(); loadStatus();
+  if (running || rebuilding || !confirm('Rebuild the demo bank? This clears all cases, findings and freezes.')) return;
+  setRebuilding(true);
+  try {
+    await fetch('/api/reset', { method: 'POST' });
+  } catch (e) { /* the request can drop on slow hosting; the status poll below decides */ }
+  finally {
+    await waitForRebuild();
+    selected = null; $('#side').innerHTML = '';
+    setRebuilding(false);
+    loadAlerts(); loadStatus();
+  }
 };
 loadStatus(); loadAlerts();
 </script>

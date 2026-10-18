@@ -65,14 +65,18 @@ def run() -> int:
     db.write("MATCH (al:Alert) DETACH DELETE al")
     seq = 0
     for rule, (desc, cypher) in RULES.items():
+        rows = []
         for row in db.read(cypher):
             seq += 1
-            detail = ", ".join(f"{k}={v}" for k, v in row.items() if k != "account")
+            rows.append({"acc": row["account"], "id": f"AL-{seq:05d}",
+                         "detail": ", ".join(f"{k}={v}" for k, v in row.items() if k != "account")})
+        if rows:
             db.write(
-                """MATCH (a:Account {id: $acc})
-                   CREATE (al:Alert {id: $id, rule: $rule, description: $desc, detail: $detail,
+                """UNWIND $rows AS r
+                   MATCH (a:Account {id: r.acc})
+                   CREATE (al:Alert {id: r.id, rule: $rule, description: $desc, detail: r.detail,
                                      status: 'open', created: timestamp()})-[:FLAGS]->(a)""",
-                {"acc": row["account"], "id": f"AL-{seq:05d}", "rule": rule, "desc": desc, "detail": detail},
+                {"rows": rows, "rule": rule, "desc": desc},
             )
-            created += 1
+        created += len(rows)
     return created

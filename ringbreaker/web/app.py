@@ -20,6 +20,8 @@ from ..agent import investigate, provider
 app = FastAPI(title="RingBreaker")
 STATIC = Path(__file__).parent / "static"
 _lock = asyncio.Lock()  # one investigation writes to the graph at a time
+_state = {"rebuilding": False}  # set while /api/reset reloads the bank
+REBUILD_MSG = "The demo bank is being rebuilt. Try again in a few seconds."
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 
@@ -41,6 +43,8 @@ def index():
 @app.get("/api/status")
 def status():
     p = provider()
+    if _state["rebuilding"]:
+        return {"planner": f"{p[0]} / {p[3]}" if p else "playbook", "llm": bool(p), "rebuilding": True}
     counts = db.read("""
         MATCH (al:Alert) WITH count(al) AS alerts, sum(CASE WHEN al.status = 'open' THEN 1 ELSE 0 END) AS open
         OPTIONAL MATCH (c:Case) WITH alerts, open, count(c) AS cases
@@ -49,11 +53,13 @@ def status():
     stats = db.read("MATCH (n) RETURN count(n) AS nodes")[0]
     stats["to_review"] = db.read("MATCH (c:Case {status: 'open'}) RETURN count(c) AS n")[0]["n"] + \
         db.read("MATCH (x:Action {status: 'pending_analyst'}) RETURN count(x) AS n")[0]["n"]
-    return {"planner": f"{p[0]} / {p[3]}" if p else "playbook", "llm": bool(p), **counts, **stats}
+    return {"planner": f"{p[0]} / {p[3]}" if p else "playbook", "llm": bool(p), "rebuilding": False, **counts, **stats}
 
 
 @app.get("/api/alerts")
 def alerts():
+    if _state["rebuilding"]:
+        return []
     return db.read("""
         MATCH (al:Alert)-[:FLAGS]->(a:Account)<-[:OWNS]-(p:Person)
         RETURN al.id AS id, al.rule AS rule, al.detail AS detail, al.status AS status,
@@ -109,11 +115,35 @@ async def action_review(action_id: str, body: Decision):
 async def run(alert_id: str, planner: str = "auto"):
     if planner not in ("auto", "llm", "playbook"):
         raise HTTPException(400, "planner must be auto, llm or playbook")
+    def single(ev: dict):
+        async def gen():
+            yield f"data: {json.dumps(ev)}\n\n"
+            yield "data: {\"type\": \"done\"}\n\n"
+        return StreamingResponse(gen(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+    if _state["rebuilding"]:
+        return single({"type": "error", "message": REBUILD_MSG})
     if not db.read("MATCH (al:Alert {id: $id}) RETURN al.id AS id", {"id": alert_id}):
-        raise HTTPException(404, "unknown alert")
+        return single({"type": "error", "message": f"Alert {alert_id} is not in the current bank. Refresh the alert list."})
 
     async def stream():
-        async with _lock:
+        # wait for any running investigation or rebuild, keeping the connection alive meanwhile
+        while True:
+            try:
+                await asyncio.wait_for(_lock.acquire(), timeout=5)
+                break
+            except asyncio.TimeoutError:
+                if _state["rebuilding"]:
+                    yield f"data: {json.dumps({'type': 'error', 'message': REBUILD_MSG})}\n\n"
+                    yield "data: {\"type\": \"done\"}\n\n"
+                    return
+                yield ": waiting\n\n"
+        try:
+            if _state["rebuilding"]:
+                yield f"data: {json.dumps({'type': 'error', 'message': REBUILD_MSG})}\n\n"
+                yield "data: {\"type\": \"done\"}\n\n"
+                return
             known: set[str] = set()
             async for ev in investigate(alert_id, planner):
                 ev_nodes = (ev.get("evidence") or {}).get("nodes", [])
@@ -124,6 +154,8 @@ async def run(alert_id: str, planner: str = "auto"):
                 if new:
                     ev["nodes"] = _node_info(new)
                 yield f"data: {json.dumps(ev, default=str)}\n\n"
+        finally:
+            _lock.release()
         yield "data: {\"type\": \"done\"}\n\n"
 
     return StreamingResponse(stream(), media_type="text/event-stream",
@@ -136,6 +168,12 @@ async def reset():
     if os.getenv("RB_ALLOW_RESET", "1") != "1":
         raise HTTPException(403, "reset disabled")
     from ..load import load
+    if _state["rebuilding"]:
+        return {"ok": True, "already_running": True}
     async with _lock:
-        await asyncio.to_thread(load)
+        _state["rebuilding"] = True
+        try:
+            await asyncio.to_thread(load)
+        finally:
+            _state["rebuilding"] = False
     return {"ok": True}
